@@ -1,0 +1,9 @@
+{
+  "projects": [
+    {
+      "id": "p23a162d5ec8",
+      "runner": "windows-latest",
+      "secret_suffix": "P23A162D5EC8"
+    }
+  ]
+}

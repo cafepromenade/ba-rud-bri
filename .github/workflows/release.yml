@@ -1,0 +1,96 @@
+name: Generic artifact build pipeline
+
+# Privacy rules baked into this workflow:
+#   - No artifacts. Do not add actions/upload-artifact or download-artifact.
+#   - No releases or assets are ever created on THIS (public) repo.
+#     Project bodies publish releases only to their private RELEASE_TARGET secret.
+#   - builder.projects.json holds only opaque ids; names + release targets live
+#     in per-project secrets (RELEASE_TARGET_<SUFFIX>, BUILD_BUNDLE_KEY_<SUFFIX>).
+#   - Payload is refreshed frequently from the source side; this just rebuilds.
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    inputs:
+      project:
+        description: Opaque project id to run, or all
+        required: false
+        default: all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: artifact-pipeline-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  project-list:
+    runs-on: ubuntu-latest
+    outputs:
+      projects: ${{ steps.projects.outputs.projects }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: projects
+        shell: pwsh
+        run: |
+          $wanted = '${{ github.event.inputs.project }}'
+          if ([string]::IsNullOrWhiteSpace($wanted)) { $wanted = 'all' }
+          $config = Get-Content builder.projects.json -Raw | ConvertFrom-Json
+          $projects = @($config.projects)
+          if ($wanted -ne 'all') {
+            $projects = @($projects | Where-Object { $_.id -eq $wanted })
+          }
+          if ($projects.Count -eq 0) { throw "No matching projects for '$wanted'." }
+          $json = ConvertTo-Json @($projects) -Compress -Depth 10
+          "projects=$json" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+  build:
+    needs: project-list
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJSON(needs.project-list.outputs.projects) }}
+    runs-on: ${{ matrix.project.runner }}
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      BUILD_BUNDLE_KEY: ${{ secrets[format('BUILD_BUNDLE_KEY_{0}', matrix.project.secret_suffix)] }}
+      PRIVATE_RELEASE_TOKEN: ${{ secrets.PRIVATE_RELEASE_TOKEN }}
+      TARGET_RELEASE_REPO: ${{ secrets[format('RELEASE_TARGET_{0}', matrix.project.secret_suffix)] }}
+      PROJECT_ID: ${{ matrix.project.id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare source workspace
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:BUILD_BUNDLE_KEY)) {
+            throw "Missing key for $env:PROJECT_ID."
+          }
+          $root = "payloads/$env:PROJECT_ID"
+          $payload = Join-Path $root 'payload.bin'
+          if (-not (Test-Path -LiteralPath $payload)) {
+            $parts = @(Get-ChildItem -LiteralPath $root -Filter 'payload.part.*' -File | Sort-Object Name)
+            if ($parts.Count -eq 0) { throw "No payload found for $env:PROJECT_ID." }
+            $out = [IO.File]::Open($payload, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            try {
+              foreach ($part in $parts) {
+                $bytes = [IO.File]::ReadAllBytes($part.FullName)
+                $out.Write($bytes, 0, $bytes.Length)
+              }
+            } finally {
+              $out.Dispose()
+            }
+          }
+          ./scripts/runtime.ps1 -In $payload -Out workspace.zip
+          Expand-Archive workspace.zip -DestinationPath source -Force
+
+      - name: Run project body
+        run: |
+          $script = "workflows/$env:PROJECT_ID.ps1"
+          if (-not (Test-Path -LiteralPath $script)) { throw "Missing project body: $script" }
+          & $script
