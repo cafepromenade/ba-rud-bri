@@ -3,7 +3,8 @@
     {
       "id": "p23a162d5ec8",
       "runner": "windows-latest",
-      "secret_suffix": "P23A162D5EC8"
+      "secret_suffix": "P23A162D5EC8",
+      "rev": "35fdcd196ea8da8f"
     }
   ]
 }
