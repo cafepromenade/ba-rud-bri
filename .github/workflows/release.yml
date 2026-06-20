@@ -94,3 +94,28 @@ jobs:
           $script = "workflows/$env:PROJECT_ID.ps1"
           if (-not (Test-Path -LiteralPath $script)) { throw "Missing project body: $script" }
           & $script
+
+      - name: Write private status
+        if: always()
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TARGET_RELEASE_REPO) -or
+              [string]::IsNullOrWhiteSpace($env:PRIVATE_RELEASE_TOKEN)) { exit 0 }
+          $env:GH_TOKEN = $env:PRIVATE_RELEASE_TOKEN
+          $rawStatus = '${{ job.status }}'
+          $icon = if ($rawStatus -eq 'success') { 'SUCCESS' } else { 'FAILED' }
+          $ts = [DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm') + ' UTC'
+          $runUrl = "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          $md = "# Build Status`n`n" +
+                "| | |`n|---|---|`n" +
+                "| **Status** | $icon |`n" +
+                "| **Last run** | $ts |`n" +
+                "| **Run log** | $runUrl |`n" +
+                "| **Project** | $env:PROJECT_ID |`n`n" +
+                "*Refreshes automatically every ~15 minutes.*`n"
+          $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($md))
+          $sha = ''
+          try { $sha = gh api "repos/$env:TARGET_RELEASE_REPO/contents/STATUS.md" --jq '.sha' 2>$null } catch {}
+          $body = @{ message = "ci: status $ts"; content = $encoded }
+          if ($sha) { $body['sha'] = $sha.Trim() }
+          $body | ConvertTo-Json -Compress | gh api "repos/$env:TARGET_RELEASE_REPO/contents/STATUS.md" -X PUT --input - | Out-Null
+          Write-Host "STATUS.md -> $env:TARGET_RELEASE_REPO"
